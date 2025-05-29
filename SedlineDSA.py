@@ -8,8 +8,10 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import re
+import io
 
-st.title("Sedline EDF DSA 分析（Streamlit 版本）")
+st.set_page_config(page_title="Sedline EDF DSA 分析", layout="wide")
+st.title("Sedline EDF DSA 動態頻譜分析 (DSA)")
 
 uploaded_files = st.file_uploader("請上傳一個或多個 EDF 檔案", type="edf", accept_multiple_files=True)
 
@@ -24,10 +26,8 @@ def extract_datetime_from_filename(fname):
         return dt
     else:
         try:
-            f = pyedflib.EdfReader(fname)
-            start_datetime = f.getStartdatetime()
-            f._close()
-            return start_datetime
+            # 這裡沒辦法直接用檔名讀，先回傳現在時間
+            return datetime.now()
         except:
             return datetime.now()
 
@@ -37,18 +37,21 @@ def multitaper_dsa_sliding_mne(eeg, fs, win_sec=3, step_sec=1, fmin=1, fmax=40):
     n_total = len(eeg)
     starts = np.arange(0, n_total - n_win + 1, n_step)
     if len(starts) == 0:
+        st.warning("資料太短，無法計算 DSA")
         return None, None, None
     power_all = []
     freqs_all = None
     for start in starts:
         segment = eeg[start:start + n_win]
         try:
-            psd, freqs = psd_array_multitaper(segment, sfreq=fs, fmin=fmin, fmax=fmax,
-                                              adaptive=False, normalization='full', verbose=False)
+            psd, freqs = psd_array_multitaper(
+                segment, sfreq=fs, fmin=fmin, fmax=fmax,
+                adaptive=False, normalization='full', verbose=False)
             if freqs_all is None:
                 freqs_all = freqs
             power_all.append(psd)
-        except:
+        except Exception as e:
+            st.warning(f"MNE multitaper 計算錯誤，位置 {start}: {e}")
             continue
     if len(power_all) == 0:
         return None, None, None
@@ -57,7 +60,7 @@ def multitaper_dsa_sliding_mne(eeg, fs, win_sec=3, step_sec=1, fmin=1, fmax=40):
     return power_all, freqs_all, t_centers
 
 if uploaded_files:
-    # 依時間排序
+    # 按時間排序
     edf_files = sorted(uploaded_files, key=lambda f: extract_datetime_from_filename(f.name))
     powers = []
     freqs = None
@@ -70,7 +73,8 @@ if uploaded_files:
         file_datetime = extract_datetime_from_filename(fname)
 
         try:
-            f = pyedflib.EdfReader(fobj)
+            edf_io = io.BytesIO(fobj.read())
+            f = pyedflib.EdfReader(edf_io)
             eeg = f.readSignal(0)
             fs = f.getSampleFrequency(0)
             f._close()
@@ -117,8 +121,7 @@ if uploaded_files:
         if freqs is None:
             freqs = cur_freqs
         elif not np.array_equal(freqs, cur_freqs):
-            # 插值處理省略，需時可補充
-            pass
+            st.warning("不同檔案頻率軸不一致，暫不處理插值")
 
         time_offset_seconds = (file_datetime - dataset_start_time).total_seconds()
         actual_times_relative_to_dataset_start = [dataset_start_time + timedelta(seconds=float(sec) + time_offset_seconds) for sec in t_centers]
@@ -127,30 +130,37 @@ if uploaded_files:
         all_times.extend(actual_times_relative_to_dataset_start)
 
     if powers:
-        concat_power = np.concatenate(powers, axis=1)
-        # 顯示圖形與互動元件
-        vmin = st.slider('最小 Power (dB)', -60, 0, -40, 5)
-        vmax = st.slider('最大 Power (dB)', -20, 30, 10, 5)
-        fmin = st.slider('最低頻率 (Hz)', int(freqs[0]), int(freqs[-1]), 1)
-        fmax = st.slider('最高頻率 (Hz)', int(freqs[0]), int(freqs[-1]), 40)
-        cmap = st.selectbox('色彩映射', ['jet', 'viridis', 'plasma', 'inferno', 'magma', 'cividis'])
+        first_freq_dim = powers[0].shape[0]
+        if not all(p.shape[0] == first_freq_dim for p in powers):
+            st.error("頻率維度不一致，無法合併")
+            concat_power = None
+        else:
+            concat_power = np.concatenate(powers, axis=1)
 
-        extent = [mdates.date2num(all_times[0]), mdates.date2num(all_times[-1]), freqs[0], freqs[-1]]
-        fig, ax = plt.subplots(figsize=(12, 4))
-        im = ax.imshow(10 * np.log10(concat_power), aspect='auto', origin='lower', extent=extent,
-                       vmin=vmin, vmax=vmax, cmap=cmap)
-        ax.set_ylabel('Frequency (Hz)')
-        ax.set_xlabel('Time')
-        ax.set_title('Concatenated DSA')
-        ax.set_ylim([fmin, fmax])
-        ax.xaxis_date()
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        plt.xticks(rotation=30)
-        fig.colorbar(im, ax=ax, label='Power (dB)')
-        st.pyplot(fig)
+        if concat_power is not None and all_times:
+            vmin = st.slider("Power dB 最小值", -60, 0, -40, 5)
+            vmax = st.slider("Power dB 最大值", -20, 30, 10, 5)
+            fmin_plot = st.slider("頻率最低值 (Hz)", int(freqs[0]), int(freqs[-1]), 1)
+            fmax_plot = st.slider("頻率最高值 (Hz)", int(freqs[0]), int(freqs[-1]), 40)
+            cmap = st.selectbox("色彩映射", ['jet', 'viridis', 'plasma', 'inferno', 'magma', 'cividis'])
 
+            extent = [mdates.date2num(all_times[0]), mdates.date2num(all_times[-1]), freqs[0], freqs[-1]]
+            fig, ax = plt.subplots(figsize=(12, 4))
+            im = ax.imshow(10 * np.log10(concat_power), aspect='auto', origin='lower', extent=extent,
+                           vmin=vmin, vmax=vmax, cmap=cmap)
+            ax.set_ylabel('Frequency (Hz)')
+            ax.set_xlabel('Time')
+            ax.set_title('Concatenated DSA')
+            ax.set_ylim([fmin_plot, fmax_plot])
+            ax.xaxis_date()
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+            plt.xticks(rotation=30)
+            fig.colorbar(im, ax=ax, label='Power (dB)')
+            st.pyplot(fig)
+        else:
+            st.warning("無法繪製 DSA，請確認檔案與分析結果")
     else:
-        st.warning("沒有有效的分析數據。")
+        st.warning("沒有有效的分析數據")
 
 else:
-    st.info("請上傳至少一個 EDF 檔案")
+    st.info("請先上傳至少一個 EDF 檔案以開始分析")
