@@ -1,6 +1,6 @@
+pyedflib
 streamlit
 mne
-pyedflib
 matplotlib
 scipy
 numpy
