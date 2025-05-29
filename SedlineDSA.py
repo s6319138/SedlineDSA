@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import re
 import tempfile
+import os # Import os for removing the temporary file
 
 st.title("Sedline EDF DSA 動態頻譜分析（檔案上傳版）")
 
@@ -19,11 +20,19 @@ def extract_datetime_from_filename(fname):
     if match:
         date_str = match.group(1)
         time_str = match.group(2)
-        dt = datetime.strptime(date_str + time_str, "%y%m%d%H%M%S")
-        if dt > datetime.now() + timedelta(days=365):
-            dt = dt - timedelta(days=365*100)
+        try:
+            # Try to parse with current century first
+            dt = datetime.strptime(date_str + time_str, "%y%m%d%H%M%S")
+            # Heuristic: if the year is too far in the future, assume previous century
+            # Adjust 10 years as needed for the future threshold
+            if dt.year > datetime.now().year + 10:
+                dt = datetime.strptime(f"19{date_str}{time_str}", "%Y%m%d%H%M%S")
+        except ValueError:
+            st.warning(f"無法從檔名 '{fname}' 解析日期時間，使用當前時間。")
+            return datetime.now()
         return dt
     else:
+        st.warning(f"檔名 '{fname}' 不符合預期的日期時間格式，使用當前時間。")
         return datetime.now()
 
 def multitaper_dsa_sliding_mne(eeg, fs, win_sec=3, step_sec=1, fmin=1, fmax=40):
@@ -68,17 +77,28 @@ if uploaded_files:
         st.write(f"處理檔案: {fname}")
         file_datetime = extract_datetime_from_filename(fname)
 
+        tmp_filename = None # Initialize to None for cleanup in finally block
         try:
+            # Create a temporary file to write the uploaded BytesIO object
+            # It's crucial to write the bytes from fobj to a real file on disk
+            # so pyedflib can read it as a path.
             with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp_file:
                 tmp_file.write(fobj.read())
-                tmp_filename = tmp_file.name
+                tmp_filename = tmp_file.name # Get the path to the temporary file
+
+            # Now, pass the string path to pyedflib.EdfReader
             f = pyedflib.EdfReader(tmp_filename)
             eeg = f.readSignal(0)
             fs = f.getSampleFrequency(0)
-            f._close()
+            f._close() # Close the pyedflib reader
+
         except Exception as e:
             st.error(f"讀取 EDF 失敗: {e}")
             continue
+        finally:
+            # Ensure the temporary file is cleaned up, even if an error occurs
+            if tmp_filename and os.path.exists(tmp_filename):
+                os.remove(tmp_filename)
 
         if dataset_start_time is None:
             dataset_start_time = file_datetime
@@ -122,7 +142,7 @@ if uploaded_files:
             st.warning("不同檔案頻率軸不一致，暫不處理插值")
 
         # 這裡改成用累積時間偏移，確保時間軸連續
-        duration = t_centers[-1] - t_centers[0]
+        duration = t_centers[-1] - t_centers[0] if len(t_centers) > 1 else 0
         actual_times = [dataset_start_time + timedelta(seconds=sec + cumulative_time_offset) for sec in t_centers]
         all_times.extend(actual_times)
         cumulative_time_offset += duration + 1  # 多加1秒間隔避免重疊
@@ -144,19 +164,23 @@ if uploaded_files:
             fmax_plot = st.slider("頻率最高值 (Hz)", int(freqs[0]), int(freqs[-1]), 40)
             cmap = st.selectbox("色彩映射", ['jet', 'viridis', 'plasma', 'inferno', 'magma', 'cividis'])
 
-            extent = [mdates.date2num(all_times[0]), mdates.date2num(all_times[-1]), freqs[0], freqs[-1]]
-            fig, ax = plt.subplots(figsize=(12, 4))
-            im = ax.imshow(10 * np.log10(concat_power), aspect='auto', origin='lower', extent=extent,
-                           vmin=vmin, vmax=vmax, cmap=cmap)
-            ax.set_ylabel('Frequency (Hz)')
-            ax.set_xlabel('Time')
-            ax.set_title('Concatenated DSA')
-            ax.set_ylim([fmin_plot, fmax_plot])
-            ax.xaxis_date()
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-            plt.xticks(rotation=30)
-            fig.colorbar(im, ax=ax, label='Power (dB)')
-            st.pyplot(fig)
+            # Ensure all_times and freqs are not empty for extent calculation
+            if all_times and freqs is not None and len(freqs) > 1:
+                extent = [mdates.date2num(all_times[0]), mdates.date2num(all_times[-1]), freqs[0], freqs[-1]]
+                fig, ax = plt.subplots(figsize=(12, 4))
+                im = ax.imshow(10 * np.log10(concat_power), aspect='auto', origin='lower', extent=extent,
+                                vmin=vmin, vmax=vmax, cmap=cmap)
+                ax.set_ylabel('Frequency (Hz)')
+                ax.set_xlabel('Time')
+                ax.set_title('Concatenated DSA')
+                ax.set_ylim([fmin_plot, fmax_plot])
+                ax.xaxis_date()
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+                plt.xticks(rotation=30)
+                fig.colorbar(im, ax=ax, label='Power (dB)')
+                st.pyplot(fig)
+            else:
+                st.warning("無法繪製 DSA：時間或頻率數據不足。")
         else:
             st.warning("無法繪製 DSA，請確認檔案與分析結果")
     else:
