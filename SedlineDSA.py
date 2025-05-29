@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import re
-import io
+import tempfile
 
 st.set_page_config(page_title="Sedline EDF DSA 分析", layout="wide")
 st.title("Sedline EDF DSA 動態頻譜分析 (DSA)")
@@ -25,11 +25,7 @@ def extract_datetime_from_filename(fname):
             dt = dt - timedelta(days=365*100)
         return dt
     else:
-        try:
-            # 這裡沒辦法直接用檔名讀，先回傳現在時間
-            return datetime.now()
-        except:
-            return datetime.now()
+        return datetime.now()
 
 def multitaper_dsa_sliding_mne(eeg, fs, win_sec=3, step_sec=1, fmin=1, fmax=40):
     n_win = int(win_sec * fs)
@@ -73,8 +69,11 @@ if uploaded_files:
         file_datetime = extract_datetime_from_filename(fname)
 
         try:
-            edf_io = io.BytesIO(fobj.read())
-            f = pyedflib.EdfReader(edf_io)
+            # 用暫存檔寫入並讀取
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.edf') as tmp_file:
+                tmp_file.write(fobj.read())
+                tmp_filename = tmp_file.name
+            f = pyedflib.EdfReader(tmp_filename)
             eeg = f.readSignal(0)
             fs = f.getSampleFrequency(0)
             f._close()
