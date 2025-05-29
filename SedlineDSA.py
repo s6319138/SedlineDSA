@@ -10,8 +10,7 @@ import matplotlib.dates as mdates
 import re
 import tempfile
 
-st.set_page_config(page_title="Sedline EDF DSA 分析", layout="wide")
-st.title("Sedline EDF DSA 動態頻譜分析 (DSA)")
+st.title("Sedline EDF DSA 動態頻譜分析（檔案上傳版）")
 
 uploaded_files = st.file_uploader("請上傳一個或多個 EDF 檔案", type="edf", accept_multiple_files=True)
 
@@ -56,21 +55,21 @@ def multitaper_dsa_sliding_mne(eeg, fs, win_sec=3, step_sec=1, fmin=1, fmax=40):
     return power_all, freqs_all, t_centers
 
 if uploaded_files:
-    # 按時間排序
-    edf_files = sorted(uploaded_files, key=lambda f: extract_datetime_from_filename(f.name))
+    # 先依檔名時間排序，確保順序正確
+    uploaded_files = sorted(uploaded_files, key=lambda f: extract_datetime_from_filename(f.name))
     powers = []
     freqs = None
     all_times = []
     dataset_start_time = None
+    cumulative_time_offset = 0  # 用於累積時間偏移，保證時間軸連續
 
-    for fobj in edf_files:
+    for fobj in uploaded_files:
         fname = fobj.name
         st.write(f"處理檔案: {fname}")
         file_datetime = extract_datetime_from_filename(fname)
 
         try:
-            # 用暫存檔寫入並讀取
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.edf') as tmp_file:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp_file:
                 tmp_file.write(fobj.read())
                 tmp_filename = tmp_file.name
             f = pyedflib.EdfReader(tmp_filename)
@@ -122,11 +121,13 @@ if uploaded_files:
         elif not np.array_equal(freqs, cur_freqs):
             st.warning("不同檔案頻率軸不一致，暫不處理插值")
 
-        time_offset_seconds = (file_datetime - dataset_start_time).total_seconds()
-        actual_times_relative_to_dataset_start = [dataset_start_time + timedelta(seconds=float(sec) + time_offset_seconds) for sec in t_centers]
+        # 這裡改成用累積時間偏移，確保時間軸連續
+        duration = t_centers[-1] - t_centers[0]
+        actual_times = [dataset_start_time + timedelta(seconds=sec + cumulative_time_offset) for sec in t_centers]
+        all_times.extend(actual_times)
+        cumulative_time_offset += duration + 1  # 多加1秒間隔避免重疊
 
         powers.append(power)
-        all_times.extend(actual_times_relative_to_dataset_start)
 
     if powers:
         first_freq_dim = powers[0].shape[0]
@@ -160,6 +161,5 @@ if uploaded_files:
             st.warning("無法繪製 DSA，請確認檔案與分析結果")
     else:
         st.warning("沒有有效的分析數據")
-
 else:
-    st.info("請先上傳至少一個 EDF 檔案以開始分析")
+    st.info("請上傳至少一個 EDF 檔案")
